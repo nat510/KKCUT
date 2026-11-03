@@ -4,24 +4,28 @@
 //!
 //! KKBOX for Windows reports the song it plays to Windows' media controls,
 //! which also skip to the next song. The guard thread waits on their
-//! notices: no timer and no polling, and nothing at all while the main
-//! switch is off. With KKBOX closed there is no KKBOX session, so nothing is read.
+//! notices, plus one look every 5 s while KKBOX plays in case a notice is
+//! missed; nothing while KKBOX is paused or closed, and nothing at all while
+//! the main switch is off. Every call to KKBOX gives up after a few seconds.
 
 use crate::config::Config;
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::Foundation::TypedEventHandler;
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession as Session,
     GlobalSystemMediaTransportControlsSessionManager as Manager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status,
 };
+use windows_future::{AsyncStatus, IAsyncOperation};
 
-/// KKBOX's media session name (its Electron app ID).
-const KKBOX: &str = "electron.app.KKBOX";
+/// KKBOX's media session names (its app ID) contain this, ignoring case:
+/// `electron.app.KKBOX`, or `com.kkbox.electron-app`, depending on how
+/// KKBOX was started. KKBOX makes its session once it starts playing.
+const KKBOX: &str = "kkbox";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Song {
@@ -164,7 +168,18 @@ fn parts(artist: &str) -> Vec<(String, String)> {
         .flat_map(|part| {
             let shown = strip(part);
             let alias = han_prefix(shown).map(|h| (name_key(h), h.to_string()));
-            std::iter::once((name_key(part), shown.to_string())).chain(alias)
+            // Chinese names have no spaces: "五月天 阿信" is two of them.
+            let words: Vec<&str> = shown.split_whitespace().collect();
+            let chinese =
+                |w: &&str| w.chars().count() >= 2 && w.chars().all(|c| is_han(c) || c == '·');
+            let several: Vec<(String, String)> = if words.len() > 1 && words.iter().all(chinese) {
+                words.iter().map(|w| (name_key(w), w.to_string())).collect()
+            } else {
+                Vec::new()
+            };
+            std::iter::once((name_key(part), shown.to_string()))
+                .chain(alias)
+                .chain(several)
         })
         .filter(|(key, _)| !key.is_empty())
         .collect()
@@ -210,6 +225,10 @@ pub const AUTHOR_BLACK: &[&str] = &[
     "王天放",
     "張星特",
     "格雷乐团-Grey",
+    "薇薇",
+    "陳敏萱",
+    "Jansley Lee",
+    "章昊 (ZHANG HAO)",
 ];
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -442,14 +461,20 @@ fn write_skipped(list: &[Skipped], keep: usize) {
     let _ = std::fs::write(path, text);
 }
 
-fn record(entry: Skipped, keep: usize) {
+/// Adds a record. With `amend`, a pause right after a skip replaces that
+/// skip's record of the same song instead of adding a second one.
+fn record(entry: Skipped, keep: usize, amend: bool) {
     let _lock = SKIPPED_LOCK.lock().unwrap();
     let path = data_file(SKIPPED_FILE);
     let old = path
         .and_then(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
     let mut list = parse_skipped(&old);
-    list.insert(0, entry);
+    if amend && list.first().is_some_and(|s| s.song == entry.song) {
+        list[0] = entry;
+    } else {
+        list.insert(0, entry);
+    }
     write_skipped(&list, keep);
 }
 
@@ -709,14 +734,71 @@ thread_local! {
     static APARTMENT: windows::core::Result<Apartment> = Apartment::initialize();
 }
 
+/// KKBOX answers through Windows' media service, and a call can go unanswered
+/// (KKBOX busy, closing or restarting); no call may hold up the guard or the window.
+const ANSWER: Duration = Duration::from_secs(3);
+/// The session manager, asked for once per process, can be slow to come.
+const MANAGER_ANSWER: Duration = Duration::from_secs(15);
+
+/// Waits for `op` (named `what` in the log) for at most `limit`.
+fn wait_for<T: windows::core::RuntimeType + 'static>(
+    op: IAsyncOperation<T>,
+    what: &str,
+    limit: Duration,
+) -> windows::core::Result<T> {
+    let start = Instant::now();
+    while op.Status()? == AsyncStatus::Started {
+        if start.elapsed() > limit {
+            let _ = op.Cancel();
+            crate::log(&format!(
+                "KKBOX: no answer to {what} in {} s, cancelled",
+                limit.as_secs()
+            ));
+            return Err(windows::core::Error::new(
+                windows::Win32::Foundation::E_ABORT,
+                format!("Windows 媒體控制 {} 秒內沒有回應", limit.as_secs()),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    op.GetResults()
+}
+
+/// Waits for a call to KKBOX for at most [`ANSWER`].
+fn wait<T: windows::core::RuntimeType + 'static>(
+    op: IAsyncOperation<T>,
+    what: &str,
+) -> windows::core::Result<T> {
+    wait_for(op, what, ANSWER)
+}
+
+/// One session manager for the process: each new one leaves a thread behind
+/// in Windows' media runtime. Asked for every 2 s by the window, that came to
+/// thousands of threads, and Windows' media controls stopped answering.
+static MANAGER: Mutex<Option<Manager>> = Mutex::new(None);
+
 fn manager() -> windows::core::Result<Manager> {
     APARTMENT.with(|a| a.as_ref().map(|_| ()).map_err(Clone::clone))?;
-    Manager::RequestAsync()?.join()
+    let mut cached = MANAGER.lock().unwrap();
+    if let Some(m) = cached.as_ref() {
+        return Ok(m.clone());
+    }
+    // The manager outlives the thread that asked for it (the window reads on
+    // short-lived threads): the multithreaded apartment is kept for the process.
+    unsafe { windows::Win32::System::Com::CoIncrementMTAUsage()? };
+    let m = wait_for(Manager::RequestAsync()?, "RequestAsync", MANAGER_ANSWER)?;
+    *cached = Some(m.clone());
+    Ok(m)
 }
 
 fn kkbox_session(manager: &Manager) -> windows::core::Result<Option<Session>> {
     for session in manager.GetSessions()? {
-        if session.SourceAppUserModelId()? == KKBOX {
+        if session
+            .SourceAppUserModelId()?
+            .to_string()
+            .to_ascii_lowercase()
+            .contains(KKBOX)
+        {
             return Ok(Some(session));
         }
     }
@@ -724,7 +806,10 @@ fn kkbox_session(manager: &Manager) -> windows::core::Result<Option<Session>> {
 }
 
 fn song(session: &Session) -> windows::core::Result<Song> {
-    let p = session.TryGetMediaPropertiesAsync()?.join()?;
+    let p = wait(
+        session.TryGetMediaPropertiesAsync()?,
+        "TryGetMediaPropertiesAsync",
+    )?;
     Ok(Song {
         title: p.Title()?.to_string(),
         artist: p.Artist()?.to_string(),
@@ -754,9 +839,11 @@ struct Setup {
 
 /// The main switch (None = off), and a wake-up for the guard thread.
 static GUARD: (Mutex<Option<Setup>>, Condvar) = (Mutex::new(None), Condvar::new());
-/// Set by media notices; the guard looks at KKBOX again.
+/// Set by media notices and settings changes; the guard looks at KKBOX again.
 static DIRTY: AtomicBool = AtomicBool::new(false);
-/// Set by a settings change: the playing song is judged again.
+/// Set when the rules change (a name added to the black list, a switch, a
+/// new China list): the playing song is judged under them, and the skips in
+/// a row start again from none.
 static REJUDGE: AtomicBool = AtomicBool::new(false);
 
 fn poke() {
@@ -771,8 +858,14 @@ pub fn configure(config: &Config, lists: Arc<Lists>) {
         lists,
         keep: config.history,
     });
-    *GUARD.0.lock().unwrap() = setup;
-    REJUDGE.store(true, Ordering::Release);
+    let mut current = GUARD.0.lock().unwrap();
+    let changed = matches!((&*current, &setup), (Some(old), Some(new))
+        if old.rules != new.rules || !Arc::ptr_eq(&old.lists, &new.lists));
+    *current = setup;
+    drop(current);
+    if changed {
+        REJUDGE.store(true, Ordering::Release);
+    }
     poke();
 }
 
@@ -829,58 +922,113 @@ impl Watch {
         }
     }
 
-    /// Skips the playing song if a rule says so. `last` is the song judged
-    /// last: it is judged again only after a settings change.
-    fn check(&mut self, last: &mut Option<Song>) -> windows::core::Result<()> {
+    /// Skips the playing song if a rule says so, or pauses KKBOX when
+    /// skipping does not get rid of it. Returns when to look again without
+    /// a notice.
+    fn check(&mut self, memory: &mut Memory) -> windows::core::Result<Option<Duration>> {
+        // Soon after a skip, look every second: KKBOX may bring the same song
+        // back with no notice, and shows no song for a second or two between songs.
+        let soon = memory
+            .skipped
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() < AFTER_SKIP)
+            .then_some(Duration::from_secs(1));
+        // KKBOX drops its session for a second or so at every song change, so
+        // a missing session keeps what was skipped: with Repeat one, the same
+        // song comes back in a new session.
         let Some(session) = self.follow()? else {
-            *last = None;
-            return Ok(());
+            return Ok(soon);
         };
         if session.GetPlaybackInfo()?.PlaybackStatus()? != Status::Playing {
-            return Ok(());
+            return Ok(soon);
         }
+        // While KKBOX plays, a light look now and then in case a notice is missed.
+        let soon = soon.or(Some(PLAYING_LOOK));
         let song = song(&session)?;
-        if song.title.is_empty() || last.as_ref() == Some(&song) {
-            return Ok(());
+        if song.title.is_empty() {
+            return Ok(soon);
         }
         let (reason, keep) = {
             let setup = GUARD.0.lock().unwrap();
             let Some(setup) = setup.as_ref() else {
-                return Ok(());
+                return Ok(None);
             };
             (judge(&song, &setup.lists, &setup.rules), setup.keep)
         };
-        *last = Some(song.clone());
         let Some(reason) = reason else {
-            return Ok(());
+            *memory = Memory::default();
+            return Ok(soon);
         };
-        let note = if !session.TrySkipNextAsync()?.join()? {
-            "；KKBOX 沒有切歌"
-        } else {
-            // With one song in the playlist, or Repeat one, KKBOX's next
-            // song is the same one: then KKBOX is paused instead.
-            std::thread::sleep(Duration::from_millis(1500));
-            if self::song(&session).is_ok_and(|now| now == song) {
-                match session.TryPauseAsync()?.join()? {
-                    true => "；沒有下一首，已暫停 KKBOX",
-                    false => "；沒有下一首，KKBOX 也沒有暫停",
+        let back = match &memory.skipped {
+            Some((s, at)) if *s == song && at.elapsed() < REMEMBER => {
+                // KKBOX may still show the skipped song while the next one loads.
+                if at.elapsed() < GRACE {
+                    return Ok(Some(GRACE - at.elapsed()));
                 }
-            } else {
-                ""
+                true
             }
+            _ => false,
         };
-        record(
-            Skipped {
-                when: now(),
-                name: reason.name().unwrap_or_default().to_string(),
-                reason: format!("{reason}{note}"),
-                song,
-            },
-            keep,
-        );
-        Ok(())
+        let why = if back {
+            Some("切歌後又回到這首（只剩這首可播，或單曲循環）".to_string())
+        } else if memory.run >= MAX_RUN {
+            Some(format!("連續切了 {MAX_RUN} 首，剩下的歌都會被切"))
+        } else if !wait(session.TrySkipNextAsync()?, "TrySkipNextAsync")? {
+            Some("KKBOX 沒有切歌".to_string())
+        } else {
+            None
+        };
+        let name = reason.name().unwrap_or_default().to_string();
+        let entry = |text: String| Skipped {
+            when: now(),
+            song: song.clone(),
+            reason: text,
+            name: name.clone(),
+        };
+        match why {
+            None => {
+                record(entry(reason.to_string()), keep, false);
+                memory.skipped = Some((song, Instant::now()));
+                memory.run += 1;
+                Ok(Some(Duration::from_secs(1)))
+            }
+            Some(why) => {
+                let paused = match wait(session.TryPauseAsync()?, "TryPauseAsync") {
+                    Ok(true) => "已暫停 KKBOX",
+                    _ => "KKBOX 也沒有暫停",
+                };
+                // A song skipping brought back replaces its own skip record.
+                record(entry(format!("{reason}；{why}，{paused}")), keep, back);
+                *memory = Memory::default();
+                Ok(None)
+            }
+        }
     }
 }
+
+/// What the guard remembers between looks at KKBOX.
+#[derive(Default)]
+struct Memory {
+    /// The song skipped last, and when. Still playing after [`GRACE`], it is
+    /// paused instead.
+    skipped: Option<(Song, Instant)>,
+    /// Songs skipped in a row with nothing allowed in between.
+    run: u32,
+}
+
+/// KKBOX's time to start the next song after a skip.
+const GRACE: Duration = Duration::from_secs(3);
+/// How long after a skip the guard keeps looking every second.
+const AFTER_SKIP: Duration = Duration::from_secs(8);
+/// A skipped song seen again later than this (KKBOX closed and opened
+/// again, say) is skipped as a new one, not paused.
+const REMEMBER: Duration = Duration::from_secs(30);
+/// Skips in a row before KKCUT pauses KKBOX: every song left is skipped.
+const MAX_RUN: u32 = 8;
+/// While KKBOX plays: one look at its song this often, without a notice.
+const PLAYING_LOOK: Duration = Duration::from_secs(5);
+/// When Windows' media controls could not be watched: try again this often.
+const WATCH_RETRY: Duration = Duration::from_secs(30);
 
 impl Drop for Watch {
     fn drop(&mut self) {
@@ -891,18 +1039,30 @@ impl Drop for Watch {
 
 fn guard() {
     let mut watch: Option<Watch> = None;
-    let mut last: Option<Song> = None;
+    let mut memory = Memory::default();
+    // When to look at KKBOX again without a notice.
+    let mut look: Option<Instant> = None;
     loop {
         let on = {
             let mut setup = GUARD.0.lock().unwrap();
             while !DIRTY.load(Ordering::Acquire) {
-                setup = GUARD.1.wait(setup).unwrap();
+                match look {
+                    None => setup = GUARD.1.wait(setup).unwrap(),
+                    Some(at) => {
+                        let now = Instant::now();
+                        if now >= at {
+                            break;
+                        }
+                        setup = GUARD.1.wait_timeout(setup, at - now).unwrap().0;
+                    }
+                }
             }
             setup.is_some()
         };
+        look = None;
         if !on {
             watch = None;
-            last = None;
+            memory = Memory::default();
             DIRTY.store(false, Ordering::Release);
             continue;
         }
@@ -911,7 +1071,6 @@ fn guard() {
                 Ok(w) => Some(w),
                 Err(e) => {
                     crate::log(&format!("KKBOX not watched: {e}"));
-                    DIRTY.store(false, Ordering::Release);
                     None
                 }
             };
@@ -920,12 +1079,19 @@ fn guard() {
             std::thread::sleep(SETTLE);
         }
         if REJUDGE.swap(false, Ordering::AcqRel) {
-            last = None;
+            memory.run = 0;
         }
-        if let Some(w) = watch.as_mut()
-            && let Err(e) = w.check(&mut last)
-        {
-            crate::log(&format!("KKBOX song not checked: {e}"));
+        let Some(w) = watch.as_mut() else {
+            look = Some(Instant::now() + WATCH_RETRY);
+            continue;
+        };
+        match w.check(&mut memory) {
+            Ok(next) => look = next.map(|d| Instant::now() + d),
+            Err(e) => {
+                crate::log(&format!("KKBOX song not checked: {e}"));
+                // A call KKBOX left unanswered: try again shortly.
+                look = Some(Instant::now() + PLAYING_LOOK);
+            }
         }
     }
 }
@@ -997,6 +1163,21 @@ mod tests {
             ["华晨宇", "gai", "higher brothers", "tizzy t"]
         );
         assert_eq!(names("(G)I-DLE"), ["(g)i-dle"]);
+        // A long line with aliases: the last artist is still a name of its own.
+        assert!(
+            names(
+                "言承旭 (Jerry Yan), 吳建豪 (Van Ness Wu), 周渝民 (Vic Chou), 五月天 阿信 (Ashin)"
+            )
+            .contains(&"五月天".to_string())
+        );
+        // Chinese names have no spaces: space-separated Chinese words are names too.
+        assert_eq!(
+            names("周渝民 (Vic Chou), 五月天 阿信 (Ashin)"),
+            ["周渝民", "五月天 阿信", "五月天", "阿信"]
+        );
+        // ... but not the words of a Latin name, or a word of one character.
+        assert_eq!(names("Jansley Lee"), ["jansley lee"]);
+        assert_eq!(names("林 宥嘉"), ["林 宥嘉"]);
         // A Latin alias with no bracket; the Chinese part is matched too.
         assert_eq!(
             names("Gareth.T, 攬佬SKAI ISYOURGOD"),
@@ -1013,6 +1194,39 @@ mod tests {
         assert_eq!(names("希林娜依·高 (Curley G)"), ["希林娜依高"]);
         assert_eq!(names("希林娜依高"), ["希林娜依高"]);
         assert!(names("").is_empty());
+    }
+
+    #[test]
+    fn every_joint_kkbox_uses_splits_the_artist_line() {
+        for joint in [
+            " feat. ",
+            " Feat. ",
+            " ft. ",
+            " featuring ",
+            " x ",
+            " X ",
+            "|",
+            "、",
+            ",",
+            "，",
+            "&",
+            "＆",
+            "/",
+            "／",
+            ";",
+            "；",
+            "×",
+        ] {
+            assert_eq!(names(&format!("A{joint}B")), ["a", "b"], "{joint:?}");
+        }
+        // A trailing alias in either bracket is dropped.
+        assert_eq!(names("周杰倫（Jay Chou）"), ["周杰伦"]);
+        assert_eq!(names("章昊 (ZHANG HAO)"), ["章昊"]);
+        // Both scripts compare as one name.
+        assert_eq!(names("林俊傑"), names("林俊杰"));
+        assert_eq!(names("周杰倫"), names("周杰伦"));
+        // A word that only looks like a joint is not one.
+        assert_eq!(names("Xavier"), ["xavier"]);
     }
 
     #[test]
@@ -1148,13 +1362,31 @@ mod tests {
             Some(Reason::AuthorList("雾明".into()))
         );
         assert_eq!(
-            judge(&song("我不想念", "希林娜依·高 (Curley G)", ""), &l, &rules()),
+            judge(
+                &song("我不想念", "希林娜依·高 (Curley G)", ""),
+                &l,
+                &rules()
+            ),
             Some(Reason::AuthorList("希林娜依·高".into()))
         );
         assert_eq!(
             judge(&song("x", "格雷樂團-Grey", ""), &l, &rules()),
             Some(Reason::AuthorList("格雷樂團-Grey".into()))
         );
+        assert_eq!(
+            judge(&song("x", "陈敏萱", ""), &l, &rules()),
+            Some(Reason::AuthorList("陈敏萱".into()))
+        );
+        assert_eq!(
+            judge(&song("x", "JANSLEY LEE", ""), &l, &rules()),
+            Some(Reason::AuthorList("JANSLEY LEE".into()))
+        );
+        assert_eq!(
+            judge(&song("x", "章昊", ""), &l, &rules()),
+            Some(Reason::AuthorList("章昊".into()))
+        );
+        // A name of the list inside a longer one is not that name.
+        assert_eq!(judge(&song("x", "薇薇安", ""), &l, &rules()), None);
         let off = Rules {
             author_enabled: false,
             ..rules()
@@ -1204,6 +1436,64 @@ mod tests {
     #[ignore = "reads what KKBOX plays on this PC"]
     fn hw_now_playing_reads_kkbox() {
         println!("{:?}", now_playing().unwrap());
+    }
+
+    // Writes down what KKBOX reports every 250 ms, for KKCUT_RECORD_SECS
+    // seconds (30 by default); reads only, changes nothing. Run with
+    // `cargo test hw_record -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "reads what KKBOX plays on this PC"]
+    fn hw_record_what_kkbox_reports() {
+        let secs: u64 = std::env::var("KKCUT_RECORD_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(30);
+        let manager = manager().unwrap();
+        for s in manager.GetSessions().unwrap() {
+            println!("session {}", s.SourceAppUserModelId().unwrap());
+        }
+        let start = Instant::now();
+        let before = thread_count();
+        while start.elapsed() < Duration::from_secs(secs) {
+            let t = start.elapsed().as_millis();
+            // Asked for each time, as the window does: it must be the cached one.
+            match kkbox_session(&super::manager().unwrap()) {
+                Ok(Some(session)) => {
+                    let status = session
+                        .GetPlaybackInfo()
+                        .and_then(|p| p.PlaybackStatus())
+                        .map(|s| format!("{s:?}"))
+                        .unwrap_or_else(|e| e.to_string());
+                    let at = session
+                        .GetTimelineProperties()
+                        .and_then(|p| p.Position())
+                        .map_or(-1, |p| p.Duration / 10_000);
+                    match super::song(&session) {
+                        Ok(s) => println!(
+                            "{t:>6} {status} {at:>7}ms | {} | {} | {}",
+                            s.title, s.artist, s.album
+                        ),
+                        Err(e) => println!("{t:>6} {status} {at:>7}ms | error {e}"),
+                    }
+                }
+                Ok(None) => println!("{t:>6} no KKBOX session"),
+                Err(e) => println!("{t:>6} error {e}"),
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        // One manager for the process: the thread count stays flat.
+        println!("threads before {before} after {}", thread_count());
+    }
+
+    /// Threads of this process.
+    fn thread_count() -> usize {
+        let script = format!("(Get-Process -Id {}).Threads.Count", std::process::id());
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok())
+            .unwrap_or(0)
     }
 
     // About 100–300 requests to zh.wikipedia.org; writes china-artists.json.

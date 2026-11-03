@@ -39,6 +39,7 @@ component NameList inherits VerticalLayout {
     HorizontalLayout {
         spacing: 8px;
         field := LineEdit {
+            font-family: Theme.han-font;
             placeholder-text: "輸入歌手或樂團名稱，按 Enter 加入";
             accepted(text) => {
                 if text != "" { root.add(text); self.text = ""; }
@@ -59,7 +60,7 @@ component NameList inherits VerticalLayout {
                 height: 44px;
                 HorizontalLayout {
                     padding-left: 16px; padding-right: 12px; spacing: 8px;
-                    Text { text: name; font-size: 15px; color: Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                    Text { text: name; font-size: 15px; font-family: Theme.han-font; color: Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
                     VerticalLayout {
                         alignment: center;
                         TipButton { text: "X"; tip: root.remove-tip; tone: Theme.danger; clicked => { root.remove(name); } }
@@ -192,10 +193,10 @@ export component AppWindow inherits Window {
                             chip := Text { text: root.now-state; font-size: 13px; color: root.now-playing ? Theme.accent-text : Theme.muted; }
                         }
                     }
-                    if root.now-title != "": Text { text: root.now-title; font-size: 21px; font-weight: 700; color: Theme.text; wrap: word-wrap; }
-                    if root.now-artist != "": Text { text: root.now-artist; font-size: 15px; color: Theme.text; wrap: word-wrap; }
-                    if root.now-album != "": Text { text: "專輯：" + root.now-album; font-size: 14px; color: Theme.muted; wrap: word-wrap; }
-                    if root.now-verdict != "": Text { text: root.now-verdict; font-size: 14px; font-weight: 700; color: Theme.danger; wrap: word-wrap; }
+                    if root.now-title != "": Text { text: root.now-title; font-size: 21px; font-family: Theme.han-font; font-weight: 700; color: Theme.text; wrap: word-wrap; }
+                    if root.now-artist != "": Text { text: root.now-artist; font-size: 15px; font-family: Theme.han-font; color: Theme.text; wrap: word-wrap; }
+                    if root.now-album != "": Text { text: "專輯：" + root.now-album; font-size: 14px; font-family: Theme.han-font; color: Theme.muted; wrap: word-wrap; }
+                    if root.now-verdict != "": Text { text: root.now-verdict; font-size: 14px; font-family: Theme.han-font; font-weight: 700; color: Theme.danger; wrap: word-wrap; }
                 }
                 Card {
                     title: "自動切歌";
@@ -275,9 +276,9 @@ export component AppWindow inherits Window {
                                 alignment: center;
                                 horizontal-stretch: 1;
                                 spacing: 1px;
-                                Text { text: row.title; font-size: 15px; font-weight: 700; color: Theme.text; overflow: elide; }
-                                Text { text: row.artist; font-size: 14px; color: Theme.text; overflow: elide; }
-                                Text { text: row.detail; font-size: 13px; color: Theme.muted; wrap: word-wrap; }
+                                Text { text: row.title; font-size: 15px; font-family: Theme.han-font; font-weight: 700; color: Theme.text; overflow: elide; }
+                                Text { text: row.artist; font-size: 14px; font-family: Theme.han-font; color: Theme.text; overflow: elide; }
+                                Text { text: row.detail; font-size: 13px; font-family: Theme.han-font; color: Theme.muted; wrap: word-wrap; }
                             }
                             VerticalLayout {
                                 alignment: center;

@@ -18,6 +18,11 @@ export global Theme {
     out property <color> ok: #12a36a;
     out property <color> warn: #e0a100;
     out property <color> tip: #1f2a30;
+    // For song titles, singer names and the list fields. Windows' fallback for
+    // Chinese follows the system's languages and may be a Traditional-only font,
+    // leaving simplified characters (还 坚 爱 颂) blank. Microsoft YaHei UI ships
+    // with Windows and has simplified, traditional and kana.
+    out property <string> han-font: "Microsoft YaHei UI";
 }
 
 // A setting with a title, an optional line under it, and a switch.
