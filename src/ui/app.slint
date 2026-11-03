@@ -1,0 +1,373 @@
+import { ComboBox, LineEdit, ListView, ScrollView } from "std-widgets.slint";
+import { Theme, CutSwitch, TipButton, CutButton, LinkButton, Card, TabItem } from "theme.slint";
+
+export struct SkipRow {
+    title: string,
+    artist: string,
+    detail: string,
+    // An artist of the song is on the white list now.
+    allowed: bool,
+}
+
+// The China list's state: 0 ready, 1 fetching, 2 missing or failed.
+component ListInfo inherits HorizontalLayout {
+    in property <int> state;
+    in property <string> text;
+    spacing: 8px;
+    alignment: start;
+    VerticalLayout {
+        alignment: start;
+        padding-top: 5px;
+        Rectangle {
+            width: 10px; height: 10px; border-radius: 5px;
+            background: root.state == 0 ? Theme.ok : root.state == 1 ? Theme.warn : Theme.danger;
+        }
+    }
+    Text { text: root.text; font-size: 14px; color: Theme.text; wrap: word-wrap; horizontal-stretch: 1; }
+}
+
+// The black list and white list tabs.
+component NameList inherits VerticalLayout {
+    in property <string> intro;
+    in property <string> remove-tip;
+    in property <[string]> names;
+    in property <color> tone;
+    callback add(string);
+    callback remove(string);
+    spacing: 12px;
+    Text { text: root.intro; font-size: 14px; color: Theme.muted; wrap: word-wrap; }
+    HorizontalLayout {
+        spacing: 8px;
+        field := LineEdit {
+            placeholder-text: "輸入歌手或樂團名稱，按 Enter 加入";
+            accepted(text) => {
+                if text != "" { root.add(text); self.text = ""; }
+            }
+        }
+        CutButton {
+            text: "加入";
+            enabled: field.text != "";
+            clicked => { root.add(field.text); field.text = ""; }
+        }
+    }
+    Rectangle {
+        vertical-stretch: 1;
+        background: Theme.card; border-radius: 10px; border-width: 1px; border-color: Theme.line;
+        if root.names.length == 0: Text { text: "（名單是空的）"; color: Theme.faint; font-size: 14px; }
+        ListView {
+            for name in root.names: Rectangle {
+                height: 44px;
+                HorizontalLayout {
+                    padding-left: 16px; padding-right: 12px; spacing: 8px;
+                    Text { text: name; font-size: 15px; color: Theme.text; vertical-alignment: center; overflow: elide; horizontal-stretch: 1; }
+                    VerticalLayout {
+                        alignment: center;
+                        TipButton { text: "X"; tip: root.remove-tip; tone: Theme.danger; clicked => { root.remove(name); } }
+                    }
+                }
+                Rectangle { y: parent.height - 1px; height: 1px; x: 12px; width: parent.width - 24px; background: Theme.line; }
+            }
+        }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "KKCUT - KKBOX 自動切歌器";
+    icon: @image-url("../../assets/icon.png");
+    default-font-family: "Microsoft JhengHei UI";
+    default-font-size: 16px;
+    preferred-width: 620px; preferred-height: 760px;
+    min-width: 480px; min-height: 480px;
+    background: Theme.page;
+
+    in-out property <int> tab;
+    in property <string> version;
+
+    // Home
+    in property <string> now-state;
+    in property <string> now-title;
+    in property <string> now-artist;
+    in property <string> now-album;
+    in property <string> now-verdict;
+    in property <bool> now-playing;
+    in-out property <bool> enabled;
+    in-out property <bool> artists;
+    in-out property <bool> titles;
+    in-out property <bool> black-enabled;
+    in-out property <bool> author-enabled;
+    callback set-enabled(bool);
+    callback set-artists(bool);
+    callback set-titles(bool);
+    callback set-black-enabled(bool);
+    callback set-author-enabled(bool);
+    in property <string> list-info;
+    in property <int> list-state;
+
+    // Skipped
+    in property <[SkipRow]> skipped;
+    in property <[string]> history-choices: ["5", "15", "25", "50"];
+    in-out property <int> history-index;
+    callback history-changed(int);
+    callback skip-delete(int);
+    callback skip-allow(int);
+
+    // Black list and white list
+    in property <[string]> black-names;
+    in property <[string]> white-names;
+    callback list-add(bool, string);
+    callback list-remove(bool, string);
+
+    // Settings
+    in-out property <bool> autostart;
+    in property <string> autostart-error;
+    callback set-autostart(bool);
+    callback refresh-list();
+    callback open-site();
+    callback open-folder();
+
+    callback tab-changed(int);
+
+    VerticalLayout {
+        // Title and tabs on KKBOX cyan.
+        Rectangle {
+            background: @linear-gradient(90deg, #12c9f2 0%, #0bb4e8 100%);
+            VerticalLayout {
+                padding-left: 16px; padding-right: 16px; padding-top: 12px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    Image { source: @image-url("../../assets/icon.png"); width: 32px; height: 32px; }
+                    VerticalLayout {
+                        alignment: center;
+                        Text { text: "KKCUT"; font-size: 19px; font-weight: 800; color: white; }
+                        Text { text: "KKBOX 自動切歌器"; font-size: 12px; color: #ffffffd9; }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    VerticalLayout {
+                        alignment: center;
+                        // The main switch, also on the home tab.
+                        Rectangle {
+                            height: 28px; width: state.preferred-width + 24px; border-radius: 14px;
+                            background: root.enabled ? (chip-touch.has-hover ? #ffffffe0 : #ffffff) : (chip-touch.has-hover ? #e5484dd0 : Theme.danger);
+                            accessible-role: button;
+                            accessible-label: root.enabled ? "切歌中，按下停止" : "破防中，按下開始切歌";
+                            accessible-action-default => { root.enabled = !root.enabled; root.set-enabled(root.enabled); }
+                            state := Text {
+                                text: root.enabled ? "切歌中" : "破防中";
+                                font-size: 13px; font-weight: 700;
+                                color: root.enabled ? Theme.accent-text : white;
+                            }
+                            chip-touch := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => { root.enabled = !root.enabled; root.set-enabled(root.enabled); }
+                            }
+                        }
+                    }
+                }
+                HorizontalLayout {
+                    alignment: start;
+                    padding-top: 6px;
+                    for name[i] in ["首頁", "切歌單", "黑名單", "白名單", "設定"]: TabItem {
+                        text: name;
+                        selected: root.tab == i;
+                        clicked => { root.tab = i; root.tab-changed(i); }
+                    }
+                }
+            }
+        }
+
+        // Home
+        if root.tab == 0: ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: start;
+                padding: 16px; spacing: 12px;
+                Card {
+                    title: "現在播放";
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: start;
+                        Rectangle {
+                            height: 22px; width: chip.preferred-width + 16px; border-radius: 11px;
+                            background: root.now-playing ? Theme.accent-soft : #eef2f4;
+                            chip := Text { text: root.now-state; font-size: 13px; color: root.now-playing ? Theme.accent-text : Theme.muted; }
+                        }
+                    }
+                    if root.now-title != "": Text { text: root.now-title; font-size: 21px; font-weight: 700; color: Theme.text; wrap: word-wrap; }
+                    if root.now-artist != "": Text { text: root.now-artist; font-size: 15px; color: Theme.text; wrap: word-wrap; }
+                    if root.now-album != "": Text { text: "專輯：" + root.now-album; font-size: 14px; color: Theme.muted; wrap: word-wrap; }
+                    if root.now-verdict != "": Text { text: root.now-verdict; font-size: 14px; font-weight: 700; color: Theme.danger; wrap: word-wrap; }
+                }
+                Card {
+                    title: "自動切歌";
+                    CutSwitch {
+                        text: "啟動";
+                        hint: "總開關：關閉時 KKCUT 不讀取 KKBOX，也不切歌";
+                        checked <=> root.enabled;
+                        toggled(on) => { root.set-enabled(on); }
+                    }
+                    Rectangle { height: 1px; background: Theme.line; }
+                    CutSwitch {
+                        text: "中國歌手自動切歌";
+                        hint: "歌手或樂團在中國歌手名單上就切掉";
+                        dim: !root.enabled;
+                        checked <=> root.artists;
+                        toggled(on) => { root.set-artists(on); }
+                    }
+                    CutSwitch {
+                        text: "簡體中文自動切歌";
+                        hint: "歌名或專輯名是簡體中文就切掉（台港澳星馬歌手與日文歌除外）";
+                        dim: !root.enabled;
+                        checked <=> root.titles;
+                        toggled(on) => { root.set-titles(on); }
+                    }
+                    CutSwitch {
+                        text: "黑名單自動切歌";
+                        hint: "歌手在黑名單上就切掉";
+                        dim: !root.enabled;
+                        checked <=> root.black-enabled;
+                        toggled(on) => { root.set-black-enabled(on); }
+                    }
+                    CutSwitch {
+                        text: "作者黑名單自動切歌";
+                        hint: "歌手在 KKCUT 作者整理的名單上就切掉；加入白名單的歌手不受影響";
+                        dim: !root.enabled;
+                        checked <=> root.author-enabled;
+                        toggled(on) => { root.set-author-enabled(on); }
+                    }
+                }
+                Card {
+                    title: "中國歌手名單";
+                    ListInfo { state: root.list-state; text: root.list-info; }
+                }
+            }
+        }
+
+        // Skipped
+        if root.tab == 1: VerticalLayout {
+            vertical-stretch: 1;
+            padding: 16px; spacing: 12px;
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "記錄最近"; font-size: 15px; color: Theme.text; vertical-alignment: center; }
+                ComboBox {
+                    width: 90px;
+                    model: root.history-choices;
+                    current-index <=> root.history-index;
+                    selected => { root.history-changed(self.current-index); }
+                }
+                Text { text: "首切掉的歌"; font-size: 15px; color: Theme.text; vertical-alignment: center; }
+                Rectangle { horizontal-stretch: 1; }
+            }
+            Text {
+                text: "X：刪除這筆記錄　O：把歌手加入白名單，以後不再切掉";
+                font-size: 13px; color: Theme.muted; wrap: word-wrap;
+            }
+            Rectangle {
+                vertical-stretch: 1;
+                background: Theme.card; border-radius: 10px; border-width: 1px; border-color: Theme.line;
+                if root.skipped.length == 0: Text { text: "還沒有切過歌"; color: Theme.faint; font-size: 14px; }
+                ListView {
+                    for row[i] in root.skipped: Rectangle {
+                        height: info.preferred-height + 20px;
+                        HorizontalLayout {
+                            padding-left: 16px; padding-right: 12px; spacing: 10px;
+                            info := VerticalLayout {
+                                alignment: center;
+                                horizontal-stretch: 1;
+                                spacing: 1px;
+                                Text { text: row.title; font-size: 15px; font-weight: 700; color: Theme.text; overflow: elide; }
+                                Text { text: row.artist; font-size: 14px; color: Theme.text; overflow: elide; }
+                                Text { text: row.detail; font-size: 13px; color: Theme.muted; wrap: word-wrap; }
+                            }
+                            VerticalLayout {
+                                alignment: center;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    TipButton { text: "X"; tip: "刪除這筆記錄"; tone: Theme.danger; clicked => { root.skip-delete(i); } }
+                                    TipButton {
+                                        text: "O";
+                                        tip: row.allowed ? "已在白名單" : "加入白名單";
+                                        tone: Theme.ok;
+                                        enabled: !row.allowed;
+                                        done: row.allowed;
+                                        clicked => { root.skip-allow(i); }
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle { y: parent.height - 1px; height: 1px; x: 12px; width: parent.width - 24px; background: Theme.line; }
+                    }
+                }
+            }
+        }
+
+        // Black list
+        if root.tab == 2: NameList {
+            vertical-stretch: 1;
+            padding: 16px;
+            intro: "名單上歌手或樂團的歌一律切掉（首頁「黑名單自動切歌」開啟時）。簡體、繁體都會比對，括號裡的別名不必輸入。";
+            remove-tip: "移出黑名單";
+            names: root.black-names;
+            add(name) => { root.list-add(true, name); }
+            remove(name) => { root.list-remove(true, name); }
+        }
+
+        // White list
+        if root.tab == 3: NameList {
+            vertical-stretch: 1;
+            padding: 16px;
+            intro: "名單上歌手或樂團的歌永遠不切，優先於所有規則。加入白名單會同時移出黑名單。";
+            remove-tip: "移出白名單";
+            names: root.white-names;
+            add(name) => { root.list-add(false, name); }
+            remove(name) => { root.list-remove(false, name); }
+        }
+
+        // Settings
+        if root.tab == 4: ScrollView {
+            vertical-stretch: 1;
+            VerticalLayout {
+                alignment: start;
+                padding: 16px; spacing: 12px;
+                Card {
+                    title: "啟動";
+                    CutSwitch {
+                        text: "登入時自動啟動";
+                        hint: "登入 Windows 後在背景啟動 KKCUT，常駐於通知區域";
+                        checked <=> root.autostart;
+                        toggled(on) => { root.set-autostart(on); }
+                    }
+                    if root.autostart-error != "": Text { text: root.autostart-error; font-size: 13px; color: Theme.danger; wrap: word-wrap; }
+                }
+                Card {
+                    title: "中國歌手名單";
+                    ListInfo { state: root.list-state; text: root.list-info; }
+                    Text {
+                        text: "名單取自中文維基百科的中國歌手與樂團分類，並排除台灣、香港、澳門、馬來西亞、新加坡的歌手。維基百科要求一次只送一個請求，所以更新需要幾分鐘。";
+                        font-size: 13px; color: Theme.muted; wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        padding-top: 4px;
+                        CutButton {
+                            text: root.list-state == 1 ? "更新中…" : "手動更新中國歌手資料";
+                            enabled: root.list-state != 1;
+                            clicked => { root.refresh-list(); }
+                        }
+                    }
+                }
+                Card {
+                    title: "關於";
+                    Text { text: "KKCUT v" + root.version + "　以 AGPL-3.0-or-later 授權釋出"; font-size: 14px; color: Theme.text; wrap: word-wrap; }
+                    Text { text: "關閉視窗後 KKCUT 仍在通知區域執行；要完全結束，請在通知區域圖示按右鍵選「結束」。"; font-size: 13px; color: Theme.muted; wrap: word-wrap; }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: 16px;
+                        LinkButton { text: "GitHub 專案頁"; clicked => { root.open-site(); } }
+                        LinkButton { text: "開啟資料夾"; clicked => { root.open-folder(); } }
+                    }
+                }
+            }
+        }
+    }
+}

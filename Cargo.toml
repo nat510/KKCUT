@@ -1,0 +1,44 @@
+[package]
+name = "kkcut"
+version = "1.1.0"
+edition = "2024"
+description = "KKCUT - KKBOX 自動切歌器"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/nat510/KKCUT"
+build = "build.rs"
+
+[[bin]]
+name = "KKCUT"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Media_Control",
+    "Win32_System_Com",
+] }
+slint = { version = "=1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2", "accessibility", "unstable-winit-030"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Gdi",
+    "Win32_Networking_WinHttp",
+    "Win32_Security",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+slint-build = "=1.18.1"
+embed-resource = "3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

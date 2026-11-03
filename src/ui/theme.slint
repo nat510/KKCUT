@@ -1,0 +1,174 @@
+// KKCUT's look: KKBOX cyan on a light page. Every control that shows an on
+// state is drawn here, so it takes the cyan and not the Windows accent colour.
+
+export global Theme {
+    out property <color> accent: #10c3ee;
+    out property <color> accent-hover: #0db3dc;
+    out property <color> accent-pressed: #0a9fc4;
+    out property <color> accent-text: #0784a6;
+    out property <color> accent-soft: #e3f7fd;
+    out property <color> page: #f3f8fa;
+    out property <color> card: #ffffff;
+    out property <color> line: #dde9ee;
+    out property <color> text: #10212b;
+    out property <color> muted: #5f7480;
+    out property <color> faint: #9aabb4;
+    out property <color> track-off: #c6d2d8;
+    out property <color> danger: #e5484d;
+    out property <color> ok: #12a36a;
+    out property <color> warn: #e0a100;
+    out property <color> tip: #1f2a30;
+}
+
+// A setting with a title, an optional line under it, and a switch.
+export component CutSwitch inherits Rectangle {
+    in property <string> text;
+    in property <string> hint;
+    in property <bool> dim;
+    in-out property <bool> checked;
+    callback toggled(bool);
+    accessible-role: checkbox;
+    accessible-label: root.text;
+    accessible-description: root.hint;
+    accessible-checked: root.checked;
+    accessible-action-default => { root.flip(); }
+    function flip() {
+        root.checked = !root.checked;
+        root.toggled(root.checked);
+    }
+    min-height: 48px;
+    forward-focus: focus;
+    focus := FocusScope {
+        key-pressed(e) => {
+            if e.text == " " || e.text == "\n" {
+                root.flip();
+                return accept;
+            }
+            reject
+        }
+    }
+    touch := TouchArea { clicked => { focus.focus(); root.flip(); } }
+    HorizontalLayout {
+        spacing: 12px;
+        padding-top: 6px; padding-bottom: 6px;
+        VerticalLayout {
+            alignment: center;
+            spacing: 2px;
+            Text { text: root.text; font-size: 15px; color: root.dim ? Theme.muted : Theme.text; wrap: word-wrap; }
+            if root.hint != "": Text { text: root.hint; font-size: 13px; color: Theme.muted; wrap: word-wrap; }
+        }
+        Rectangle {
+            width: 46px;
+            VerticalLayout {
+                alignment: center;
+                track := Rectangle {
+                    height: 26px; border-radius: 13px;
+                    background: root.checked ? (touch.has-hover ? Theme.accent-hover : Theme.accent) : (touch.has-hover ? Theme.faint : Theme.track-off);
+                    opacity: root.dim ? 0.55 : 1;
+                    border-width: focus.has-focus ? 2px : 0px; border-color: Theme.accent-pressed;
+                    animate background { duration: 120ms; }
+                    Rectangle {
+                        width: 20px; height: 20px; border-radius: 10px; y: 3px;
+                        x: root.checked ? parent.width - self.width - 3px : 3px;
+                        background: white;
+                        drop-shadow-blur: 2px; drop-shadow-color: #0000003a; drop-shadow-offset-y: 1px;
+                        animate x { duration: 120ms; easing: ease-out; }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// A small round button that names what it does in a tooltip on its left.
+export component TipButton inherits Rectangle {
+    in property <string> text;
+    in property <string> tip;
+    in property <color> tone: Theme.accent;
+    in property <bool> enabled: true;
+    in property <bool> done;
+    callback clicked();
+    accessible-role: button;
+    accessible-label: root.tip;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    width: 30px; height: 30px; border-radius: 15px;
+    background: root.done ? root.tone : !root.enabled ? #eef2f4 : touch.pressed ? root.tone.darker(15%) : touch.has-hover ? root.tone : root.tone.with-alpha(0.12);
+    Text {
+        text: root.text; font-size: 15px; font-weight: 800;
+        color: root.done || (root.enabled && touch.has-hover) ? white : root.enabled ? root.tone : Theme.faint;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: root.enabled ? pointer : default; clicked => { root.clicked(); } }
+    bubble := Rectangle {
+        x: - self.width - 8px;
+        y: (parent.height - self.height) / 2;
+        width: label.preferred-width + 18px; height: 26px; border-radius: 5px;
+        background: Theme.tip;
+        opacity: touch.has-hover ? 1 : 0;
+        animate opacity { duration: 120ms; }
+        label := Text { text: root.tip; color: white; font-size: 13px; vertical-alignment: center; horizontal-alignment: center; }
+    }
+}
+
+// A filled cyan button.
+export component CutButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    callback clicked();
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-enabled: root.enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    min-width: label.preferred-width + 32px; min-height: 34px; border-radius: 6px;
+    background: !root.enabled ? Theme.track-off : touch.pressed ? Theme.accent-pressed : touch.has-hover ? Theme.accent-hover : Theme.accent;
+    label := Text { text: root.text; color: white; font-size: 15px; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+    touch := TouchArea { enabled: root.enabled; mouse-cursor: root.enabled ? pointer : default; clicked => { root.clicked(); } }
+}
+
+// A text button without a fill, for links.
+export component LinkButton inherits Rectangle {
+    in property <string> text;
+    callback clicked();
+    accessible-role: button;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+    min-width: label.preferred-width; min-height: 24px;
+    label := Text { text: root.text; color: touch.has-hover ? Theme.accent-pressed : Theme.accent-text; font-size: 14px; vertical-alignment: center; }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
+
+export component Card inherits Rectangle {
+    in property <string> title;
+    background: Theme.card;
+    border-radius: 10px;
+    border-width: 1px; border-color: Theme.line;
+    VerticalLayout {
+        padding: 16px; padding-top: 12px;
+        spacing: 6px;
+        if root.title != "": Text { text: root.title; font-size: 13px; font-weight: 700; color: Theme.muted; }
+        @children
+    }
+}
+
+// One tab of the bar under the title.
+export component TabItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> selected;
+    callback clicked();
+    accessible-role: tab;
+    accessible-label: root.text;
+    accessible-action-default => { root.clicked(); }
+    min-width: label.preferred-width + 28px; height: 40px;
+    label := Text {
+        text: root.text; font-size: 15px;
+        font-weight: root.selected ? 700 : 400;
+        color: root.selected ? white : touch.has-hover ? white : #ffffffc8;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    Rectangle {
+        y: parent.height - 4px; height: 4px; x: 12px; width: parent.width - 24px; border-radius: 2px;
+        background: root.selected ? white : transparent;
+    }
+    touch := TouchArea { mouse-cursor: pointer; clicked => { root.clicked(); } }
+}
