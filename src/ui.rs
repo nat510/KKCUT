@@ -45,7 +45,7 @@ fn model<T: Clone + 'static>(rows: Vec<T>) -> slint::ModelRc<T> {
 
 pub fn run(hidden: bool) {
     let config = Config::load();
-    let lists = Arc::new(kkbox::load().unwrap_or_default());
+    let lists = Arc::new(kkbox::current());
     kkbox::configure(&config, lists.clone());
     kkbox::spawn();
 
@@ -56,6 +56,8 @@ pub fn run(hidden: bool) {
     w.set_titles(config.titles);
     w.set_black_enabled(config.black_enabled);
     w.set_author_enabled(config.author_enabled);
+    w.set_ai(config.ai);
+    w.set_ai_keep_japan(config.ai_keep_japan);
     w.set_history_index(
         HISTORY_CHOICES
             .iter()
@@ -182,6 +184,8 @@ fn wire(w: &AppWindow) {
     w.on_set_titles(|on| change(|c| c.titles = on));
     w.on_set_black_enabled(|on| change(|c| c.black_enabled = on));
     w.on_set_author_enabled(|on| change(|c| c.author_enabled = on));
+    w.on_set_ai(|on| change(|c| c.ai = on));
+    w.on_set_ai_keep_japan(|on| change(|c| c.ai_keep_japan = on));
     w.on_history_changed(|i| {
         if let Some(&n) = HISTORY_CHOICES.get(i as usize) {
             change(|c| c.history = n);
@@ -267,15 +271,22 @@ fn update_lists() {
 }
 
 fn list_text(lists: &kkbox::Lists) -> (String, i32) {
+    let virtual_singers = format!(
+        "AI 與虛擬歌手名字 {} 個（內建），其中 {} 個是日本的。",
+        lists.ai.len(),
+        lists.ai_japan.len()
+    );
     if lists.fetched == 0 {
         (
-            "還沒有中國歌手名單。下載完成前，只會依簡體中文歌名與黑名單切歌。".into(),
+            format!(
+                "還沒有中國歌手名單。下載完成前，只會依簡體中文歌名、黑名單與 AI 與虛擬歌手切歌。{virtual_singers}"
+            ),
             2,
         )
     } else {
         (
             format!(
-                "共 {} 位中國歌手與樂團；另有 {} 位台港澳星馬歌手與樂團不會被切。取自 {} 個維基百科分類，{}更新。",
+                "共 {} 位中國歌手與樂團；另有 {} 位台港澳星馬歌手與樂團不會被切。取自 {} 個維基百科分類，{}更新。{virtual_singers}",
                 lists.china.len(),
                 lists.elsewhere.len(),
                 lists.categories,

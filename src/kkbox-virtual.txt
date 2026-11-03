@@ -1,0 +1,146 @@
+# Virtual singers built into KKCUT: Chinese Wikipedia's 虚拟歌手 category (two levels) and
+# each page's Japanese and English titles, fetched 2026-11-03. "ja" marks the Japanese ones.
+# Refresh adds any newer names to these.
+22/7	ja
+Aoki Lapis
+Girls Reverse	ja
+Hatsune Miku	ja
+Hiyama Kiyoteru	ja
+IA -ARIA ON THE PLANETES-	ja
+Kaai Yuki	ja
+Kagamine Rin/Len	ja
+Kizuna AI	ja
+Luo Tianyi
+Megurine Luka	ja
+Nekomura Iroha	ja
+Otomachi Una	ja
+Project 575	ja
+Project575	ja
+SF-A2 Miki	ja
+SF-A2 开発コード miki	ja
+SF-A2 開発コード miki	ja
+SF-A2开发Code miki	ja
+SF-A2開發Code miki	ja
+STU Girls
+Snow Miku	ja
+Super Sonico	ja
+Utatane Piko	ja
+V Flower	ja
+V flower	ja
+VY2
+Xin Hua
+Yuezheng Ling
+Yuzuki Yukari	ja
+ZOLA PROJECT
+ZOLA Project
+がくっぽいど	ja
+すーぱーそに子	ja
+キズナアイ	ja
+ピアプロキャラクターズ	ja
+ピコ	ja
+东方栀子
+东雪莲
+乐正绫
+乐正龙牙
+冰山清輝	ja
+冰山清辉	ja
+凪原凉菜
+凪原涼菜
+初音ミク	ja
+初音未來	ja
+初音未来	ja
+夏語遙
+夏语遥
+夢限大MewType	ja
+夢限大みゅーたいぷ	ja
+少女 RE:VERSE	ja
+少女リバース	ja
+巡音ルカ	ja
+巡音流歌	ja
+心华
+心華
+星塵
+星塵Minus
+星尘
+星尘Minus
+星瞳
+東方梔子
+東雪蓮
+桜乃そら	ja
+梦限大MewType	ja
+梦限大みゅーたいぷ	ja
+樂正綾
+樂正龍牙
+樱乃空	ja
+櫻乃空	ja
+歌愛ユキ	ja
+歌愛雪	ja
+歌手音PIKO	ja
+歌爱ユキ	ja
+歌爱雪	ja
+氷山キヨテル	ja
+洛天依
+猫村いろは	ja
+猫村伊吕波	ja
+紲星あかり	ja
+紲星燈	ja
+絆愛	ja
+結月ゆかり	ja
+結月緣	ja
+绁星あかり	ja
+绁星灯	ja
+绊爱	ja
+结月ゆかり	ja
+结月缘	ja
+苍姬Lapis
+荷兹
+荷茲
+蒼姬Lapis
+角色主唱系列	ja
+言和
+訐譙龍
+讦谯龙
+貓村いろは	ja
+貓村伊呂波	ja
+超級索尼子	ja
+超级索尼子	ja
+鏡音リン・レン	ja
+鏡音鈴、連	ja
+镜音リン・レン	ja
+镜音铃、连	ja
+雪ミク	ja
+雪未來	ja
+雪未来	ja
+音街ウナ	ja
+音街鰻	ja
+音街鳗	ja
+鳴花Hime、Mikoto	ja
+鳴花ヒメ・ミコト	ja
+鸣花Hime、Mikoto	ja
+鸣花ヒメ・ミコト	ja
+
+# AI singers added by hand (KKBOX names), 2026-11-03. Not on Wikipedia.
+Breaking Rust
+Cain Walker
+苏娜
+石川小町
+大头针Official
+Yuri尤栗
+登叔
+六六
+幽岚
+Meomuru머무르
+머무르
+Sienna Rose
+沧桑小杰
+荼鸢
+徐爱颜
+陆思川
+方念
+挚彬同学
+海莉
+雲宇光
+幻神·米丝
+严清语
+蔷芜
+辉宇·星

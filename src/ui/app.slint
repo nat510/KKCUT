@@ -96,11 +96,15 @@ export component AppWindow inherits Window {
     in-out property <bool> titles;
     in-out property <bool> black-enabled;
     in-out property <bool> author-enabled;
+    in-out property <bool> ai;
+    in-out property <bool> ai-keep-japan;
     callback set-enabled(bool);
     callback set-artists(bool);
     callback set-titles(bool);
     callback set-black-enabled(bool);
     callback set-author-enabled(bool);
+    callback set-ai(bool);
+    callback set-ai-keep-japan(bool);
     in property <string> list-info;
     in property <int> list-state;
 
@@ -213,6 +217,21 @@ export component AppWindow inherits Window {
                         dim: !root.enabled;
                         checked <=> root.artists;
                         toggled(on) => { root.set-artists(on); }
+                    }
+                    CutSwitch {
+                        text: "AI 與虛擬歌手自動切歌";
+                        hint: "VOCALOID、虛擬偶像與 AI 歌手就切掉（名單內建，不需下載）";
+                        dim: !root.enabled;
+                        checked <=> root.ai;
+                        toggled(on) => { root.set-ai(on); }
+                    }
+                    CutSwitch {
+                        text: "保留日本虛擬歌手（初音ミク等 VOCALOID）";
+                        hint: "日本的虛擬歌手，以及歌手名有日文假名的歌，不會因為是虛擬歌手被切";
+                        dim: !root.enabled;
+                        enabled: root.ai;
+                        checked <=> root.ai-keep-japan;
+                        toggled(on) => { root.set-ai-keep-japan(on); }
                     }
                     CutSwitch {
                         text: "簡體中文自動切歌";

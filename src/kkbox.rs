@@ -1,6 +1,6 @@
-//! Skips songs by singers and bands from China, songs with simplified
-//! Chinese song or album titles, and songs by artists on the black list,
-//! while KKBOX plays.
+//! Skips songs by singers and bands from China, by AI and virtual singers,
+//! songs with simplified Chinese song or album titles, and songs by artists
+//! on the black list, while KKBOX plays.
 //!
 //! KKBOX for Windows reports the song it plays to Windows' media controls,
 //! which also skip to the next song. The guard thread waits on their
@@ -9,7 +9,7 @@
 //! the main switch is off. Every call to KKBOX gives up after a few seconds.
 
 use crate::config::Config;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -137,12 +137,43 @@ fn strip(name: &str) -> &str {
 /// A name as compared: stripped, in simplified form, Latin names ignoring
 /// case, without the middle dot (希林娜依·高 is 希林娜依高). Simplified is
 /// the one form both scripts fold into: 林俊傑 and 林俊杰 are one key, though
-/// Windows keeps 杰 when converting to traditional.
+/// Windows keeps 杰 when converting to traditional. Names are never compared
+/// in traditional form for the same reason (头发 becomes 頭發).
 fn name_key(name: &str) -> String {
     convert(strip(name), false)
         .to_lowercase()
         .replace(['·', '・', '•', '‧'], "")
+        .chars()
+        .map(|c| {
+            FOLD.iter()
+                .find(|(from, _)| *from == c)
+                .map_or(c, |(_, to)| *to)
+        })
+        .collect()
 }
+
+/// Characters Windows' conversion leaves unsimplified, or turns into a rarer
+/// form (鍾 becomes 锺 where China writes 钟). Only variants of one character:
+/// 祢, 吒, 鍊, 鉅 and 囉 mean something else and stay, and 肖 and 蕭 are two
+/// surnames.
+const FOLD: &[(char, char)] = &[
+    ('後', '后'),
+    ('乾', '干'),
+    ('锺', '钟'),
+    ('於', '于'),
+    ('蹟', '迹'),
+    ('綫', '线'),
+    ('羣', '群'),
+    ('峯', '峰'),
+    ('牀', '床'),
+    ('衆', '众'),
+    ('爲', '为'),
+    ('僞', '伪'),
+    ('綉', '绣'),
+    ('慾', '欲'),
+    ('昇', '升'),
+    ('粧', '妆'),
+];
 
 /// KKBOX often writes a Chinese name and its Latin alias with no bracket
 /// ("攬佬SKAI ISYOURGOD"); the Chinese part, two characters or more, is a
@@ -197,6 +228,11 @@ pub struct Lists {
     pub china: HashSet<String>,
     /// Singers and bands from Taiwan, Hong Kong, Macau, Malaysia and Singapore.
     pub elsewhere: HashSet<String>,
+    /// AI and virtual singers (Vocaloid characters, virtual idols), by their
+    /// Chinese, Japanese and English names.
+    pub ai: HashSet<String>,
+    /// The Japanese ones among them (初音ミク, 初音未來, Hatsune Miku).
+    pub ai_japan: HashSet<String>,
     /// When the lists were fetched (Unix time); 0 = never.
     pub fetched: u64,
     pub categories: usize,
@@ -237,6 +273,9 @@ pub struct Rules {
     pub titles: bool,
     pub black_enabled: bool,
     pub author_enabled: bool,
+    pub ai: bool,
+    /// Japanese virtual singers are not skipped.
+    pub ai_keep_japan: bool,
     /// Name keys of the white list (never skipped), the black list and the author's.
     pub white: HashSet<String>,
     pub black: HashSet<String>,
@@ -250,6 +289,8 @@ impl Rules {
             titles: config.titles,
             black_enabled: config.black_enabled,
             author_enabled: config.author_enabled,
+            ai: config.ai,
+            ai_keep_japan: config.ai_keep_japan,
             white: config.white.iter().flat_map(|a| names(a)).collect(),
             black: config.black.iter().flat_map(|a| names(a)).collect(),
             author: AUTHOR_BLACK.iter().flat_map(|a| names(a)).collect(),
@@ -268,6 +309,7 @@ pub enum Reason {
     BlackList(String),
     AuthorList(String),
     Artist(String),
+    Virtual(String),
     SimplifiedTitle,
     SimplifiedAlbum,
 }
@@ -276,7 +318,9 @@ impl Reason {
     /// The artist that matched, if a name did.
     pub fn name(&self) -> Option<&str> {
         match self {
-            Self::BlackList(n) | Self::AuthorList(n) | Self::Artist(n) => Some(n),
+            Self::BlackList(n) | Self::AuthorList(n) | Self::Artist(n) | Self::Virtual(n) => {
+                Some(n)
+            }
             _ => None,
         }
     }
@@ -288,6 +332,7 @@ impl std::fmt::Display for Reason {
             Self::BlackList(name) => write!(f, "黑名單：{name}"),
             Self::AuthorList(name) => write!(f, "作者黑名單：{name}"),
             Self::Artist(name) => write!(f, "中國歌手：{name}"),
+            Self::Virtual(name) => write!(f, "虛擬歌手：{name}"),
             Self::SimplifiedTitle => f.write_str("簡體中文歌名"),
             Self::SimplifiedAlbum => f.write_str("簡體中文專輯名"),
         }
@@ -297,6 +342,8 @@ impl std::fmt::Display for Reason {
 /// Why `song` is skipped, if it is. The white list beats every rule;
 /// artists on the Taiwan, Hong Kong, Macau, Malaysia and Singapore list, and
 /// songs with kana in the artist line, are never skipped for a title.
+/// Japanese virtual singers can be kept: by the Japanese list, or kana in the
+/// artist line.
 pub fn judge(song: &Song, lists: &Lists, rules: &Rules) -> Option<Reason> {
     let artists = parts(&song.artist);
     if artists.iter().any(|(k, _)| rules.white.contains(k)) {
@@ -316,6 +363,13 @@ pub fn judge(song: &Song, lists: &Lists, rules: &Rules) -> Option<Reason> {
         && let Some((_, name)) = artists.iter().find(|(k, _)| lists.china.contains(k))
     {
         return Some(Reason::Artist(name.clone()));
+    }
+    if rules.ai
+        && let Some((key, name)) = artists.iter().find(|(k, _)| lists.ai.contains(k))
+        && !(rules.ai_keep_japan
+            && (lists.ai_japan.contains(key) || song.artist.chars().any(is_kana)))
+    {
+        return Some(Reason::Virtual(name.clone()));
     }
     if !rules.titles
         || artists.iter().any(|(k, _)| lists.elsewhere.contains(k))
@@ -341,8 +395,44 @@ fn data_file(name: &str) -> Option<PathBuf> {
 const LISTS_FILE: &str = "china-artists.json";
 const SKIPPED_FILE: &str = "skipped.txt";
 
+/// AI and virtual singers built into KKCUT, so their switches work before
+/// any fetch: one name a line, "ja" after a tab for the Japanese ones.
+const BUILT_IN_VIRTUAL: &str = include_str!("kkbox-virtual.txt");
+
+/// Chinese singers Wikipedia also files under another place (海鸣威 is in
+/// 香港男歌手), so a Refresh leaves them off the China list.
+const CHINA_TOO: &[&str] = &["海鸣威", "张杰"];
+
+fn add_built_in(lists: &mut Lists) {
+    for name in CHINA_TOO {
+        let key = name_key(name);
+        lists.elsewhere.remove(&key);
+        lists.china.insert(key);
+    }
+    for line in BUILT_IN_VIRTUAL.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (name, mark) = line.split_once('\t').unwrap_or((line, ""));
+        let key = name_key(name);
+        if mark == "ja" {
+            lists.ai_japan.insert(key.clone());
+        }
+        lists.ai.insert(key);
+    }
+}
+
+/// The lists in use: the last fetch's, if any, with the built-in virtual
+/// singers. Names are keyed as they load, so a change to `name_key` needs no
+/// fetch.
+pub fn current() -> Lists {
+    let mut lists = load().unwrap_or_default();
+    add_built_in(&mut lists);
+    lists
+}
+
 /// The lists saved by the last fetch, if any.
-pub fn load() -> Option<Lists> {
+fn load() -> Option<Lists> {
     let text = std::fs::read_to_string(data_file(LISTS_FILE)?).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     let set = |key: &str| -> HashSet<String> {
@@ -357,6 +447,8 @@ pub fn load() -> Option<Lists> {
     Some(Lists {
         china: set("china"),
         elsewhere: set("elsewhere"),
+        ai: set("ai"),
+        ai_japan: set("ai_japan"),
         fetched: json["fetched"].as_u64().unwrap_or(0),
         categories: json["categories"].as_u64().unwrap_or(0) as usize,
     })
@@ -366,6 +458,9 @@ pub fn load() -> Option<Lists> {
 fn save(
     china: &HashSet<String>,
     elsewhere: &HashSet<String>,
+    both: &[String],
+    ai: &HashSet<String>,
+    ai_japan: &HashSet<String>,
     categories: usize,
 ) -> Result<(), String> {
     fn sorted(set: &HashSet<String>) -> Vec<&String> {
@@ -378,6 +473,10 @@ fn save(
         "categories": categories,
         "china": sorted(china),
         "elsewhere": sorted(elsewhere),
+        // Also in an other-place category, and kept on the China list: for review.
+        "both": both,
+        "ai": sorted(ai),
+        "ai_japan": sorted(ai_japan),
     });
     let path = data_file(LISTS_FILE).ok_or("找不到 APPDATA 資料夾")?;
     std::fs::write(path, json.to_string()).map_err(|e| e.to_string())
@@ -516,8 +615,8 @@ const CHINA: &[&str] = &[
     "中国民谣歌手",
 ];
 
-/// Categories of the places left out. Their singers are taken off the China
-/// list (some are in both) and are never skipped for a title.
+/// Categories of the places left out. Their singers are never skipped for a
+/// title; one also in a China category stays on the China list.
 const ELSEWHERE: &[&str] = &[
     "台灣歌手",
     "台灣男歌手",
@@ -549,11 +648,20 @@ const PLACES: &[&str] = &[
     "新加坡",
 ];
 
-/// Subcategories that hold songs, albums, shows or templates, not people.
+/// Subcategories that hold songs, albums, shows or templates, not people, and
+/// record labels' artists (金牌大風藝人), who come from anywhere: a Taiwan
+/// label made 许巍 look Taiwanese.
 const NOT_PEOPLE: &[&str] = &[
     "模板", "節目", "节目", "命名", "作品", "歌曲", "專輯", "专辑", "電影", "电影", "選秀", "选秀",
-    "歌妓",
+    "歌妓", "藝人", "艺人",
 ];
+
+/// AI and virtual singers: Vocaloid characters and virtual idols of China,
+/// Taiwan, Japan and Korea (subcategories included).
+const VIRTUAL: &[&str] = &["虚拟歌手"];
+const VIRTUAL_DEPTH: usize = 2;
+/// Pages in those categories that are about the idea, not a singer.
+const NOT_SINGERS: &[&str] = &["虛擬歌手", "虚拟歌手", "AR performers", "VOCALOID衍生角色"];
 
 /// How deep subcategories are followed. The places left out have large
 /// trees (by decade, by genre), and their main categories hold most names.
@@ -673,6 +781,86 @@ fn crawl(
     Ok(pages)
 }
 
+/// A page's titles on the Japanese and English Wikipedias.
+#[derive(Default)]
+struct Titles {
+    ja: Option<String>,
+    en: Option<String>,
+}
+
+/// The Japanese and English titles of Chinese Wikipedia pages, by page:
+/// KKBOX shows Vocaloid singers by their Japanese names (初音ミク, not 初音未來).
+fn other_titles(titles: &[String]) -> Result<HashMap<String, Titles>, String> {
+    let mut out: HashMap<String, Titles> = HashMap::new();
+    for chunk in titles.chunks(50) {
+        let list = percent(&chunk.join("|"));
+        for lang in ["ja", "en"] {
+            let json = api(&format!(
+                "action=query&format=json&formatversion=2&prop=langlinks&lllimit=max\
+                 &lllang={lang}&titles={list}"
+            ))?;
+            for page in json["query"]["pages"].as_array().into_iter().flatten() {
+                let Some(title) = page["title"].as_str() else {
+                    continue;
+                };
+                for link in page["langlinks"].as_array().into_iter().flatten() {
+                    if let Some(t) = link["title"].as_str() {
+                        let entry = out.entry(title.to_string()).or_default();
+                        match lang {
+                            "ja" => entry.ja = Some(t.to_string()),
+                            _ => entry.en = Some(t.to_string()),
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// A virtual singer from Japan: the Japanese Wikipedia writes the name in
+/// kana or Latin letters (初音ミク, Megpoid, キズナアイ). Chinese ones keep
+/// their Chinese characters there (洛天依, 楽正綾).
+fn japanese(ja_title: &str) -> bool {
+    let name = strip(ja_title);
+    name.chars().any(is_kana) || name.is_ascii()
+}
+
+/// A virtual singer's name worth matching. One Latin word (Lily, MAYU, MEIKO,
+/// KAITO, Oliver) is also a real artist's name, so Latin names need two words
+/// or a digit (Hatsune Miku, 22/7).
+fn distinct(name: &str) -> bool {
+    let name = strip(name);
+    !name.is_ascii()
+        || name.split_whitespace().count() > 1
+        || name.chars().any(|c| c.is_ascii_digit())
+}
+
+/// The virtual singer list, and the Japanese ones among them, in both scripts.
+fn virtual_singers(
+    seen: &mut HashSet<String>,
+    progress: &dyn Fn(usize),
+) -> Result<(HashSet<String>, HashSet<String>), String> {
+    let mut pages = crawl(VIRTUAL, None, VIRTUAL_DEPTH, seen, progress)?;
+    pages.retain(|t| !NOT_SINGERS.contains(&t.as_str()));
+    pages.sort();
+    pages.dedup();
+    let others = other_titles(&pages)?;
+    let (mut all, mut japan) = (Vec::new(), Vec::new());
+    for page in pages {
+        let other = others.get(&page);
+        let mut names = vec![page];
+        names.extend(other.and_then(|o| o.ja.clone()));
+        names.extend(other.and_then(|o| o.en.clone()));
+        names.retain(|n| distinct(n));
+        if other.and_then(|o| o.ja.as_deref()).is_some_and(japanese) {
+            japan.extend(names.iter().cloned());
+        }
+        all.extend(names);
+    }
+    Ok((both_forms(&all), both_forms(&japan)))
+}
+
 /// Both script forms of each name.
 fn both_forms(titles: &[String]) -> HashSet<String> {
     let mut out = HashSet::new();
@@ -684,7 +872,26 @@ fn both_forms(titles: &[String]) -> HashSet<String> {
     out
 }
 
-/// Fetches both lists from Chinese Wikipedia and saves them. `progress` gets
+/// A name in both a China and an other-place category stays on `elsewhere`
+/// and comes off the China list: most of them are Taiwan and Hong Kong
+/// singers who also work in China (任贤齐, 林忆莲, 李玟). Returns those names,
+/// simplified and sorted, saved as "both" for review; the Chinese ones go in
+/// `CHINA_TOO`.
+fn elsewhere_wins(china: &mut HashSet<String>, elsewhere: &HashSet<String>) -> Vec<String> {
+    let in_elsewhere: HashSet<String> = elsewhere.iter().map(|n| name_key(n)).collect();
+    let mut both: Vec<String> = china
+        .iter()
+        .filter(|n| in_elsewhere.contains(&name_key(n)))
+        .map(|n| convert(n, false))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    both.sort();
+    china.retain(|n| !in_elsewhere.contains(&name_key(n)));
+    both
+}
+
+/// Fetches the lists from Chinese Wikipedia and saves them. `progress` gets
 /// the number of categories read so far.
 pub fn refresh(progress: &dyn Fn(usize)) -> Result<Lists, String> {
     let mut seen = HashSet::new();
@@ -696,15 +903,22 @@ pub fn refresh(progress: &dyn Fn(usize)) -> Result<Lists, String> {
         .chain(places.iter().map(String::as_str))
         .collect();
     let elsewhere = crawl(&roots, None, ELSEWHERE_DEPTH, &mut seen, progress)?;
-    let elsewhere = both_forms(&elsewhere);
-    let left_out: HashSet<String> = elsewhere.iter().map(|n| name_key(n)).collect();
     let mut china = both_forms(&china);
-    china.retain(|n| !left_out.contains(&name_key(n)));
+    let elsewhere = both_forms(&elsewhere);
+    let both = elsewhere_wins(&mut china, &elsewhere);
     if china.is_empty() {
         return Err("維基百科沒有傳回任何歌手".into());
     }
-    save(&china, &elsewhere, seen.len())?;
-    load().ok_or_else(|| "名單未能儲存".to_string())
+    // Its own crawl: the China one may have read some of these categories
+    // already. The count goes on from it.
+    let read = seen.len();
+    let mut seen_virtual = HashSet::new();
+    let (ai, ai_japan) = virtual_singers(&mut seen_virtual, &|n| progress(read + n))?;
+    let categories = read + seen_virtual.len();
+    save(&china, &elsewhere, &both, &ai, &ai_japan, categories)?;
+    let mut lists = load().ok_or_else(|| "名單未能儲存".to_string())?;
+    add_built_in(&mut lists);
+    Ok(lists)
 }
 
 // ------------------------------------------------------------------ media session
@@ -1127,10 +1341,234 @@ mod tests {
             titles: true,
             black_enabled: true,
             author_enabled: true,
+            ai: true,
+            ai_keep_japan: false,
             white: HashSet::new(),
             black: HashSet::new(),
             author: AUTHOR_BLACK.iter().flat_map(|a| names(a)).collect(),
         }
+    }
+
+    #[test]
+    fn name_keys_fold_what_windows_misses() {
+        assert_eq!(name_key("鍾漢良"), name_key("钟汉良"));
+        assert_eq!(name_key("林俊傑"), name_key("林俊杰"));
+        for (a, b) in [
+            ("張遠", "张远"),
+            ("以後", "以后"),
+            ("峯", "峰"),
+            ("爲你", "为你"),
+            ("昇", "升"),
+        ] {
+            assert_eq!(name_key(a), name_key(b), "{a} {b}");
+        }
+        // Different names stay apart: 肖 and 蕭 are two surnames, and 祢 is not 你.
+        assert_ne!(name_key("肖战"), name_key("蕭戰"));
+        assert_ne!(name_key("祢知道"), name_key("你知道"));
+        for c in ['祢', '吒', '鍊', '鉅', '囉', '肖', '蕭'] {
+            assert!(FOLD.iter().all(|(from, to)| *from != c && *to != c), "{c}");
+        }
+    }
+
+    #[test]
+    fn virtual_singers_are_skipped_by_their_switch() {
+        let l = Lists {
+            ai: keys(&["初音ミク", "洛天依", "Hatsune Miku"]),
+            ..lists()
+        };
+        let r = rules();
+        assert_eq!(
+            judge(&song("千本桜", "黒うさP feat. 初音ミク", ""), &l, &r),
+            Some(Reason::Virtual("初音ミク".into()))
+        );
+        assert_eq!(
+            Reason::Virtual("洛天依".into()).to_string(),
+            "虛擬歌手：洛天依"
+        );
+        // 洛天依 in traditional matches too.
+        assert_eq!(
+            judge(&song("普通DISCO", "洛天依, 言和", ""), &l, &r),
+            Some(Reason::Virtual("洛天依".into()))
+        );
+        assert_eq!(
+            judge(&song("World is Mine", "HATSUNE MIKU", ""), &l, &r),
+            Some(Reason::Virtual("HATSUNE MIKU".into()))
+        );
+        let off = Rules {
+            ai: false,
+            ..rules()
+        };
+        assert_eq!(judge(&song("千本桜", "初音ミク", ""), &l, &off), None);
+        // The China list is named first.
+        assert_eq!(
+            judge(&song("x", "华晨宇, 洛天依", ""), &l, &r),
+            Some(Reason::Artist("华晨宇".into()))
+        );
+        // Japanese virtual singers can be kept: by the Japanese list, or kana
+        // in the artist line.
+        let l = Lists {
+            ai_japan: keys(&["初音ミク", "Hatsune Miku"]),
+            ..l
+        };
+        let keep = Rules {
+            ai_keep_japan: true,
+            ..rules()
+        };
+        assert_eq!(
+            judge(&song("World is Mine", "Hatsune Miku", ""), &l, &keep),
+            None
+        );
+        assert_eq!(
+            judge(&song("千本桜", "黒うさP feat. 初音ミク", ""), &l, &keep),
+            None
+        );
+        assert_eq!(
+            judge(&song("普通DISCO", "洛天依", ""), &l, &keep),
+            Some(Reason::Virtual("洛天依".into()))
+        );
+        assert_eq!(
+            judge(&song("x", "洛天依 feat. ヨルシカ", ""), &l, &keep),
+            None
+        );
+        assert!(japanese("初音ミク") && japanese("Megpoid") && japanese("キズナアイ"));
+        assert!(!japanese("洛天依") && !japanese("楽正綾"));
+        // The white list and the black list still come first.
+        let allowed = Rules {
+            white: names("初音ミク").into_iter().collect(),
+            ..rules()
+        };
+        assert_eq!(judge(&song("千本桜", "初音ミク", ""), &l, &allowed), None);
+        let blocked = Rules {
+            black: names("初音ミク").into_iter().collect(),
+            ..keep
+        };
+        assert_eq!(
+            judge(&song("千本桜", "初音ミク", ""), &l, &blocked),
+            Some(Reason::BlackList("初音ミク".into()))
+        );
+    }
+
+    #[test]
+    fn built_in_virtual_singers_need_no_refresh() {
+        let names_in_file = BUILT_IN_VIRTUAL
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .count();
+        assert_eq!(names_in_file, 117 + 24);
+        let mut l = Lists::default();
+        add_built_in(&mut l);
+        for (name, japanese) in [
+            ("洛天依", false),
+            ("樂正綾", false),
+            ("初音ミク", true),
+            ("初音未來", true),
+        ] {
+            assert!(l.ai.contains(&name_key(name)), "{name}");
+            assert_eq!(l.ai_japan.contains(&name_key(name)), japanese, "{name}");
+        }
+        for name in ["lily", "mayu", "meiko", "kaito", "oliver"] {
+            assert!(!l.ai.contains(name), "{name}");
+        }
+        // Added by hand, matched as KKBOX shows them, in either script; none Japanese.
+        for name in [
+            "Breaking Rust",
+            "Cain Walker",
+            "蘇娜",
+            "石川小町",
+            "大頭針Official",
+            "Yuri尤栗",
+            "登叔",
+            "六六",
+            "幽嵐",
+            "Meomuru머무르",
+            "머무르",
+            "Sienna Rose",
+            "滄桑小傑",
+            "荼鳶",
+            "徐愛顏",
+            "陸思川",
+            "方念",
+            "摯彬同學",
+            "海莉",
+            "雲宇光",
+            "幻神·米絲",
+            "嚴清語",
+            "薔蕪",
+            "輝宇·星",
+        ] {
+            assert!(names(name).iter().any(|k| l.ai.contains(k)), "{name}");
+            assert!(
+                !names(name).iter().any(|k| l.ai_japan.contains(k)),
+                "{name}"
+            );
+        }
+        // The built-in names join a fetched list.
+        let mut fetched = Lists {
+            ai: keys(&["新虚拟歌手"]),
+            fetched: 1,
+            ..Default::default()
+        };
+        add_built_in(&mut fetched);
+        assert!(fetched.ai.contains(&name_key("新虚拟歌手")));
+        assert!(fetched.ai.contains(&name_key("洛天依")));
+    }
+
+    #[test]
+    fn only_distinct_virtual_names_are_kept() {
+        assert!(distinct("初音ミク"));
+        assert!(distinct("洛天依"));
+        assert!(distinct("Hatsune Miku"));
+        assert!(distinct("22/7 (企劃)"));
+        // One Latin word is also a real artist's name.
+        assert!(!distinct("Lily (角色)"));
+        assert!(!distinct("MAYU"));
+        assert!(!distinct("MEIKO"));
+        assert!(!distinct("KAITO"));
+        assert!(!distinct("Oliver (软件)"));
+    }
+
+    #[test]
+    fn a_singer_in_china_and_elsewhere_stays_on_the_other_list() {
+        let mut china = both_forms(&["海鸣威".into(), "任贤齐".into(), "华晨宇".into()]);
+        let elsewhere = both_forms(&["海鳴威".into(), "任賢齊".into(), "周杰倫".into()]);
+        let both = elsewhere_wins(&mut china, &elsewhere);
+        assert_eq!(both, ["任贤齐", "海鸣威"]);
+        let l = Lists {
+            china: china.iter().map(|n| name_key(n)).collect(),
+            elsewhere: elsewhere.iter().map(|n| name_key(n)).collect(),
+            ..Default::default()
+        };
+        assert!(!l.china.contains(&name_key("任賢齊")));
+        assert!(l.elsewhere.contains(&name_key("任賢齊")));
+        assert!(l.china.contains(&name_key("華晨宇")));
+        assert_eq!(judge(&song("心太软", "任贤齐", ""), &l, &rules()), None);
+    }
+
+    #[test]
+    fn built_in_chinese_singers_stay_on_the_china_list() {
+        let mut l = Lists {
+            elsewhere: keys(&["海鸣威", "张杰", "任贤齐"]),
+            fetched: 1,
+            ..Default::default()
+        };
+        add_built_in(&mut l);
+        for name in ["海鳴威", "張杰", "張傑"] {
+            assert!(l.china.contains(&name_key(name)), "{name}");
+            assert!(!l.elsewhere.contains(&name_key(name)), "{name}");
+        }
+        assert!(l.elsewhere.contains(&name_key("任賢齊")));
+        assert_eq!(
+            judge(&song("x", "海鸣威 (Haiming Wei)", ""), &l, &rules()),
+            Some(Reason::Artist("海鸣威".into()))
+        );
+    }
+
+    #[test]
+    fn label_categories_are_not_followed() {
+        for label in ["金牌大風藝人", "华研国际音乐艺人"] {
+            assert!(NOT_PEOPLE.iter().any(|w| label.contains(w)), "{label}");
+        }
+        assert!(!NOT_PEOPLE.iter().any(|w| "香港男歌手".contains(w)));
     }
 
     #[test]
@@ -1496,22 +1934,59 @@ mod tests {
             .unwrap_or(0)
     }
 
-    // About 100–300 requests to zh.wikipedia.org; writes china-artists.json.
+    // About 10 requests to zh.wikipedia.org; writes nothing.
+    #[test]
+    #[ignore = "fetches the virtual singer list from Wikipedia"]
+    fn net_virtual_singers_are_fetched() {
+        let (ai, japan) = virtual_singers(&mut HashSet::new(), &|_| {}).unwrap();
+        let mut sorted: Vec<&String> = ai.iter().collect();
+        sorted.sort();
+        println!("{} names: {sorted:?}", ai.len());
+        let mut sorted: Vec<&String> = japan.iter().collect();
+        sorted.sort();
+        println!("{} Japanese: {sorted:?}", japan.len());
+        let japan: HashSet<String> = japan.iter().map(|n| name_key(n)).collect();
+        assert!(japan.contains(&name_key("初音ミク")) && japan.contains(&name_key("初音未來")));
+        assert!(!japan.contains(&name_key("洛天依")));
+        let keys: HashSet<String> = ai.iter().map(|n| name_key(n)).collect();
+        for name in ["初音未來", "初音ミク", "洛天依", "樂正綾", "言和"] {
+            assert!(keys.contains(&name_key(name)), "{name}");
+        }
+        for name in ["lily", "mayu", "oliver", "虛擬歌手"] {
+            assert!(!keys.contains(&name_key(name)), "{name}");
+        }
+    }
+
+    // About 400 requests to zh.wikipedia.org, about 9 minutes; writes
+    // china-artists.json.
     #[test]
     #[ignore = "fetches the singer lists from Wikipedia"]
     fn net_refresh_fetches_the_lists() {
         let lists = refresh(&|n| eprint!("\r{n} categories")).unwrap();
         eprintln!();
         println!(
-            "china {} elsewhere {} categories {}",
+            "china {} elsewhere {} ai {} ai_japan {} categories {}",
             lists.china.len(),
             lists.elsewhere.len(),
+            lists.ai.len(),
+            lists.ai_japan.len(),
             lists.categories
         );
         for name in ["华晨宇", "華晨宇", "周深", "毛不易", "薛之謙"] {
             assert!(lists.china.contains(&name_key(name)), "{name}");
         }
-        for name in ["周杰倫", "王菲", "林俊傑", "陳奕迅", "五月天"] {
+        // Only under a Taiwan label's artists: on the China list.
+        for name in ["许巍", "郁可唯"] {
+            assert!(lists.china.contains(&name_key(name)), "{name}");
+        }
+        // Chinese, though also filed under another place: built in.
+        for name in ["海鸣威", "张杰"] {
+            let key = name_key(name);
+            assert!(lists.china.contains(&key), "{name}");
+            assert!(!lists.elsewhere.contains(&key), "{name}");
+        }
+        // In a China and an other-place category: on the other list.
+        for name in ["周杰倫", "林俊傑", "陳奕迅", "五月天", "任賢齊", "王菲"] {
             let key = name_key(name);
             assert!(!lists.china.contains(&key), "{name}");
             assert!(lists.elsewhere.contains(&key), "{name}");

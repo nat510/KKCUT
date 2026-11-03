@@ -17,6 +17,10 @@ pub struct Config {
     pub black_enabled: bool,
     /// Skip songs by artists on the author's black list (`kkbox::AUTHOR_BLACK`).
     pub author_enabled: bool,
+    /// Skip songs by AI and virtual singers (`kkbox::Lists::ai`).
+    pub ai: bool,
+    /// Never skip Japanese virtual singers (初音ミク and other Vocaloid).
+    pub ai_keep_japan: bool,
     /// Artists (as KKBOX names them) never skipped.
     pub white: Vec<String>,
     /// Artists always skipped while `black_enabled` is on.
@@ -33,6 +37,8 @@ impl Default for Config {
             titles: true,
             black_enabled: true,
             author_enabled: true,
+            ai: true,
+            ai_keep_japan: true,
             white: Vec::new(),
             black: Vec::new(),
             history: 15,
@@ -88,6 +94,8 @@ impl Config {
                 "titles" => c.titles = v.parse().unwrap_or(c.titles),
                 "black.enabled" => c.black_enabled = v.parse().unwrap_or(c.black_enabled),
                 "author.enabled" => c.author_enabled = v.parse().unwrap_or(c.author_enabled),
+                "ai.enabled" => c.ai = v.parse().unwrap_or(c.ai),
+                "ai.keep_japan" => c.ai_keep_japan = v.parse().unwrap_or(c.ai_keep_japan),
                 "white" => c.white = split_list(v),
                 "black" => c.black = split_list(v),
                 "history" => {
@@ -105,12 +113,14 @@ impl Config {
 
     pub fn to_text(&self) -> String {
         format!(
-            "enabled={}\nartists={}\ntitles={}\nblack.enabled={}\nauthor.enabled={}\nhistory={}\nwhite={}\nblack={}\n",
+            "enabled={}\nartists={}\ntitles={}\nblack.enabled={}\nauthor.enabled={}\nai.enabled={}\nai.keep_japan={}\nhistory={}\nwhite={}\nblack={}\n",
             self.enabled,
             self.artists,
             self.titles,
             self.black_enabled,
             self.author_enabled,
+            self.ai,
+            self.ai_keep_japan,
             self.history,
             self.white.join("|"),
             self.black.join("|"),
@@ -154,12 +164,17 @@ mod tests {
             titles: true,
             black_enabled: false,
             author_enabled: false,
+            ai: false,
+            ai_keep_japan: false,
             white: vec!["李健 (Li Jian)".into(), "GAI".into()],
             black: vec!["某网络歌手".into()],
             history: 50,
         };
         assert_eq!(Config::parse(&c.to_text()), c);
         assert_eq!(Config::parse(""), Config::default());
+        // A config.ini from before v1.4.0 has both virtual singer switches on.
+        let old = Config::parse("enabled=true\nauthor.enabled=false\n");
+        assert!(old.ai && old.ai_keep_japan);
         // Unknown history sizes fall back to the default.
         assert_eq!(Config::parse("history=7").history, 15);
     }

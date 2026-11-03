@@ -25,25 +25,32 @@ export global Theme {
     out property <string> han-font: "Microsoft YaHei UI";
 }
 
-// A setting with a title, an optional line under it, and a switch.
+// A setting with a title, an optional line under it, and a switch. `dim`
+// greys it while the main switch is off; `enabled: false` also stops it.
 export component CutSwitch inherits Rectangle {
     in property <string> text;
     in property <string> hint;
     in property <bool> dim;
+    in property <bool> enabled: true;
     in-out property <bool> checked;
     callback toggled(bool);
     accessible-role: checkbox;
     accessible-label: root.text;
     accessible-description: root.hint;
     accessible-checked: root.checked;
+    accessible-enabled: root.enabled;
     accessible-action-default => { root.flip(); }
     function flip() {
+        if !root.enabled {
+            return;
+        }
         root.checked = !root.checked;
         root.toggled(root.checked);
     }
     min-height: 48px;
     forward-focus: focus;
     focus := FocusScope {
+        enabled: root.enabled;
         key-pressed(e) => {
             if e.text == " " || e.text == "\n" {
                 root.flip();
@@ -52,14 +59,14 @@ export component CutSwitch inherits Rectangle {
             reject
         }
     }
-    touch := TouchArea { clicked => { focus.focus(); root.flip(); } }
+    touch := TouchArea { enabled: root.enabled; clicked => { focus.focus(); root.flip(); } }
     HorizontalLayout {
         spacing: 12px;
         padding-top: 6px; padding-bottom: 6px;
         VerticalLayout {
             alignment: center;
             spacing: 2px;
-            Text { text: root.text; font-size: 15px; color: root.dim ? Theme.muted : Theme.text; wrap: word-wrap; }
+            Text { text: root.text; font-size: 15px; color: root.dim || !root.enabled ? Theme.muted : Theme.text; wrap: word-wrap; }
             if root.hint != "": Text { text: root.hint; font-size: 13px; color: Theme.muted; wrap: word-wrap; }
         }
         Rectangle {
@@ -69,7 +76,7 @@ export component CutSwitch inherits Rectangle {
                 track := Rectangle {
                     height: 26px; border-radius: 13px;
                     background: root.checked ? (touch.has-hover ? Theme.accent-hover : Theme.accent) : (touch.has-hover ? Theme.faint : Theme.track-off);
-                    opacity: root.dim ? 0.55 : 1;
+                    opacity: root.dim || !root.enabled ? 0.55 : 1;
                     border-width: focus.has-focus ? 2px : 0px; border-color: Theme.accent-pressed;
                     animate background { duration: 120ms; }
                     Rectangle {
