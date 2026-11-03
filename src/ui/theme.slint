@@ -159,9 +159,9 @@ export component TabItem inherits Rectangle {
     accessible-role: tab;
     accessible-label: root.text;
     accessible-action-default => { root.clicked(); }
-    min-width: label.preferred-width + 28px; height: 40px;
+    min-width: label.preferred-width + 28px; height: 44px;
     label := Text {
-        text: root.text; font-size: 15px;
+        text: root.text; font-size: 17px;
         font-weight: root.selected ? 700 : 400;
         color: root.selected ? white : touch.has-hover ? white : #ffffffc8;
         horizontal-alignment: center; vertical-alignment: center;
